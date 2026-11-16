@@ -238,6 +238,11 @@ impl Workspace {
         }
         let recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
         self.add_document(Some(opened), window, cx);
+        if crate::log_viewer::measurement_start().is_some() {
+            window.on_next_frame(|_, _| {
+                crate::log_viewer::record_document_ready();
+            });
+        }
         recent
     }
 

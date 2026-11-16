@@ -10,7 +10,7 @@ use std::{
     rc::Rc,
     sync::Arc,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui_kit::{
@@ -84,6 +84,10 @@ pub(crate) struct LogViewer {
     preparing_trim: bool,
     preparation: Option<Progress>,
     trimming: Option<Progress>,
+    e2e_stage: u8,
+    e2e_first_painted: bool,
+    e2e_await_paint: bool,
+    e2e_stage_at: Option<Instant>,
     _submit_percentage: Subscription,
 }
 
@@ -142,6 +146,10 @@ impl LogViewer {
             preparing_trim: false,
             preparation: None,
             trimming: None,
+            e2e_stage: u8::from(e2e_enabled()),
+            e2e_first_painted: false,
+            e2e_await_paint: false,
+            e2e_stage_at: None,
             _submit_percentage: submit_percentage,
         };
         this.load_page(Destination::Restore, window, cx);
@@ -224,6 +232,144 @@ impl LogViewer {
         })
         .detach();
     }
+
+    pub(super) fn on_e2e_frame_presented(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !e2e_enabled() {
+            return;
+        }
+        self.e2e_first_painted = true;
+        if !self.reading && self.page.is_some() {
+            self.e2e_await_paint = false;
+        }
+        self.advance_e2e(window, cx);
+    }
+
+    pub(super) fn advance_e2e(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !e2e_enabled() {
+            return;
+        }
+        match self.e2e_stage {
+            1 => {
+                let ready = self.e2e_first_painted
+                    && !self.reading
+                    && self.page.is_some()
+                    && self
+                        .observation
+                        .as_ref()
+                        .is_some_and(|obs| self.index.scanned_to() >= obs.stamp.len)
+                    && self.indexing.is_none();
+                if !ready {
+                    return;
+                }
+                self.e2e_stage = 2;
+                self.e2e_await_paint = true;
+                self.e2e_stage_at = Some(Instant::now());
+                self.percentage
+                    .update(cx, |input, cx| input.set_value("50", window, cx));
+                self.jump_percent(window, cx);
+            }
+            2 => {
+                if self.e2e_await_paint || self.reading {
+                    return;
+                }
+                if let Some(at) = self.e2e_stage_at.take() {
+                    println!("RUSTTEXT jump_50pct_ms={}", at.elapsed().as_millis());
+                }
+                self.e2e_stage = 3;
+                self.e2e_await_paint = true;
+                self.e2e_stage_at = Some(Instant::now());
+                self.navigate(Destination::End, window, cx);
+            }
+            3 => {
+                if self.e2e_await_paint || self.reading {
+                    return;
+                }
+                if let Some(at) = self.e2e_stage_at.take() {
+                    println!("RUSTTEXT jump_eof_ms={}", at.elapsed().as_millis());
+                }
+                self.e2e_stage = 4;
+                self.e2e_await_paint = true;
+                self.e2e_stage_at = Some(Instant::now());
+                let before = self.bookmark.offset;
+                self.navigate(Destination::Before(before), window, cx);
+            }
+            4 => {
+                if self.e2e_await_paint || self.reading {
+                    return;
+                }
+                if let Some(at) = self.e2e_stage_at.take() {
+                    println!("RUSTTEXT scroll_prev_ms={}", at.elapsed().as_millis());
+                }
+                if let Some(needle) = e2e_needle() {
+                    self.e2e_stage = 5;
+                    self.e2e_stage_at = Some(Instant::now());
+                    self.open_search(window, cx);
+                    if let Some(search) = &self.search {
+                        search
+                            .input
+                            .update(cx, |input, cx| input.set_value(needle, window, cx));
+                    }
+                    self.start_search(false, window, cx);
+                } else {
+                    self.start_e2e_cancel_search(window, cx);
+                }
+            }
+            5 => {
+                if self
+                    .search
+                    .as_ref()
+                    .is_some_and(|search| search.progress.is_some())
+                {
+                    return;
+                }
+                if let Some(at) = self.e2e_stage_at.take() {
+                    println!("RUSTTEXT search_eof_ms={}", at.elapsed().as_millis());
+                }
+                let hits = self
+                    .search
+                    .as_ref()
+                    .and_then(|s| s.results.as_ref())
+                    .map_or(0, |r| r.hits.len());
+                println!("RUSTTEXT search_eof_hits={hits}");
+                self.start_e2e_cancel_search(window, cx);
+            }
+            6 => {
+                let done = self.search.as_ref().is_none_or(|search| {
+                    search.progress.is_none() && search.cancelled_at.is_none()
+                });
+                if !done {
+                    return;
+                }
+                self.e2e_stage = 7;
+                record_memory("after_ops");
+                println!("RUSTTEXT e2e_done=1");
+                window.remove_window();
+                cx.quit();
+            }
+            _ => {}
+        }
+    }
+
+    fn start_e2e_cancel_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.e2e_stage = 6;
+        self.open_search(window, cx);
+        if let Some(search) = &self.search {
+            search.input.update(cx, |input, cx| {
+                input.set_value("__E2E_MISS_PATTERN__", window, cx)
+            });
+        }
+        self.start_search(false, window, cx);
+        let executor = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            executor.timer(Duration::from_millis(25)).await;
+            let _ = this.update_in(cx, |viewer, _, cx| {
+                if viewer.e2e_stage == 6 {
+                    viewer.cancel_search(cx);
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 impl Drop for LogViewer {
@@ -244,13 +390,141 @@ impl Drop for LogViewer {
 }
 
 static MEASUREMENT_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static E2E_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static E2E_NEEDLE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static WINDOW_VISIBLE_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static FIRST_FRAME_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static DOC_READY_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static INDEX_READY_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn enable_measurements() {
-    if std::env::var_os("RUSTTEXT_MEASURE").is_some() {
+    let measure = std::env::var_os("RUSTTEXT_MEASURE").is_some();
+    let e2e = std::env::var_os("RUSTTEXT_E2E_PROBE").is_some_and(|v| !v.is_empty());
+    E2E_ENABLED.set(e2e).ok();
+    E2E_NEEDLE
+        .set(
+            std::env::var("RUSTTEXT_E2E_NEEDLE")
+                .ok()
+                .filter(|s| !s.is_empty()),
+        )
+        .ok();
+    if measure || e2e {
         MEASUREMENT_START.set(std::time::Instant::now()).ok();
     }
 }
 
-fn measurement_start() -> Option<std::time::Instant> {
+pub(crate) fn measurement_start() -> Option<std::time::Instant> {
     MEASUREMENT_START.get().copied()
+}
+
+pub(crate) fn e2e_enabled() -> bool {
+    E2E_ENABLED.get().copied().unwrap_or(false)
+}
+
+pub(crate) fn e2e_needle() -> Option<&'static str> {
+    E2E_NEEDLE.get().and_then(|v| v.as_deref())
+}
+
+pub(crate) fn record_window_visible() {
+    if let Some(start) = measurement_start()
+        && !WINDOW_VISIBLE_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        println!("RUSTTEXT window_visible_ms={}", start.elapsed().as_millis());
+    }
+}
+
+pub(crate) fn record_first_frame_presented() {
+    if let Some(start) = measurement_start()
+        && !FIRST_FRAME_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        println!(
+            "RUSTTEXT first_frame_presented_ms={}",
+            start.elapsed().as_millis()
+        );
+    }
+}
+
+pub(crate) fn record_document_ready() {
+    if let Some(start) = measurement_start()
+        && !DOC_READY_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        let ms = start.elapsed().as_millis();
+        println!("RUSTTEXT document_ready_ms={ms}");
+        println!("RUSTTEXT editor_ready_ms={ms}");
+    }
+}
+
+pub(crate) fn record_index_ready() {
+    if let Some(start) = measurement_start()
+        && !INDEX_READY_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        println!("RUSTTEXT index_ready_ms={}", start.elapsed().as_millis());
+        if e2e_enabled() {
+            record_memory("index_ready");
+        }
+    }
+}
+
+pub(crate) fn record_memory(stage: &str) {
+    if measurement_start().is_none() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct ProcessMemoryCountersEx {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+            private_usage: usize,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn K32GetProcessMemoryInfo(
+                process: *mut core::ffi::c_void,
+                ppsmem_counters: *mut ProcessMemoryCountersEx,
+                cb: u32,
+            ) -> i32;
+        }
+        let mut counters = ProcessMemoryCountersEx {
+            cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
+            page_fault_count: 0,
+            peak_working_set_size: 0,
+            working_set_size: 0,
+            quota_peak_paged_pool_usage: 0,
+            quota_paged_pool_usage: 0,
+            quota_peak_non_paged_pool_usage: 0,
+            quota_non_paged_pool_usage: 0,
+            pagefile_usage: 0,
+            peak_pagefile_usage: 0,
+            private_usage: 0,
+        };
+        let handle = unsafe { windows::Win32::System::Threading::GetCurrentProcess() };
+        let ok = unsafe {
+            K32GetProcessMemoryInfo(
+                handle.0,
+                &mut counters,
+                std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
+            )
+        };
+        if ok != 0 {
+            let ws = counters.working_set_size as f64 / 1_048_576.0;
+            let peak_ws = counters.peak_working_set_size as f64 / 1_048_576.0;
+            let priv_mib = counters.private_usage as f64 / 1_048_576.0;
+            println!(
+                "RUSTTEXT mem_{stage}_ws_mib={ws:.2} mem_{stage}_peak_ws_mib={peak_ws:.2} mem_{stage}_priv_mib={priv_mib:.2}"
+            );
+        }
+    }
 }

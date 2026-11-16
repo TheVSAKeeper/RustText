@@ -102,6 +102,10 @@ impl Workspace {
             this.open_paths(paths, file_actions::OpenMode::NORMAL, window, cx);
         }
         this.check_for_updates(false, window, cx);
+        crate::log_viewer::record_window_visible();
+        window.on_next_frame(|_, _| {
+            crate::log_viewer::record_first_frame_presented();
+        });
         this
     }
 

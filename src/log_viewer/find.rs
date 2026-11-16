@@ -17,14 +17,14 @@ const SEARCH_BATCH_BYTES: u64 = 8 * 1024 * 1024;
 const SEARCH_PAGE_SIZE: usize = 32;
 
 pub(super) struct LogSearch {
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     regex: bool,
     case_sensitive: bool,
     whole_word: bool,
-    results: Option<SearchPage>,
+    pub(super) results: Option<SearchPage>,
     message: SharedString,
     pub(super) progress: Option<Progress>,
-    cancelled_at: Option<Instant>,
+    pub(super) cancelled_at: Option<Instant>,
     _enter: Subscription,
 }
 
@@ -209,7 +209,7 @@ impl LogViewer {
         }
     }
 
-    fn cancel_search(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cancel_search(&mut self, cx: &mut Context<Self>) {
         if let Some(search) = &mut self.search
             && let Some(progress) = &search.progress
         {
@@ -219,7 +219,7 @@ impl LogViewer {
         }
     }
 
-    fn start_search(&mut self, more: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn start_search(&mut self, more: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.available() {
             return;
         }
@@ -291,7 +291,7 @@ impl LogViewer {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = operation.await;
-            let _ = this.update_in(cx, |viewer, _, cx| {
+            let _ = this.update_in(cx, |viewer, window, cx| {
                 let Some(search) = &mut viewer.search else {
                     return;
                 };
@@ -309,6 +309,9 @@ impl LogViewer {
                     }
                     search.message = "Поиск отменён.".into();
                     cx.notify();
+                    if super::e2e_enabled() {
+                        viewer.advance_e2e(window, cx);
+                    }
                     return;
                 }
                 match result {
@@ -334,6 +337,9 @@ impl LogViewer {
                     Err(error) => search.message = format!("Поиск остановлен. {error}").into(),
                 }
                 cx.notify();
+                if super::e2e_enabled() {
+                    viewer.advance_e2e(window, cx);
+                }
             });
         })
         .detach();

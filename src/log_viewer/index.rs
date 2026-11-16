@@ -68,7 +68,11 @@ impl LogViewer {
                     Ok(index) => {
                         viewer.index = index;
                         if viewer.index.scanned_to() >= size {
+                            super::record_index_ready();
                             viewer.start_index(window, cx);
+                            if super::e2e_enabled() {
+                                viewer.advance_e2e(window, cx);
+                            }
                         }
                     }
                     Err(LogError::Cancelled) => {}

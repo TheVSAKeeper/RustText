@@ -130,12 +130,27 @@ impl LogViewer {
         self.page = Some(loaded.page);
         self.start_index(window, cx);
 
-        if first && let Some(start) = crate::log_viewer::measurement_start() {
-            window.on_next_frame(move |_, _| {
-                println!(
-                    "RUSTTEXT first_log_frame_ms={}",
-                    start.elapsed().as_millis()
-                );
+        if (first && crate::log_viewer::measurement_start().is_some())
+            || crate::log_viewer::e2e_enabled()
+        {
+            let start = crate::log_viewer::measurement_start();
+            let e2e = crate::log_viewer::e2e_enabled();
+            let viewer = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                if first && let Some(start) = start {
+                    println!(
+                        "RUSTTEXT first_log_frame_ms={}",
+                        start.elapsed().as_millis()
+                    );
+                    if e2e {
+                        crate::log_viewer::record_memory("first_frame");
+                    }
+                }
+                if e2e {
+                    let _ = viewer.update(cx, |viewer, cx| {
+                        viewer.on_e2e_frame_presented(window, cx);
+                    });
+                }
             });
         }
     }
