@@ -325,12 +325,13 @@ impl LogViewer {
                 if let Some(at) = self.e2e_stage_at.take() {
                     println!("RUSTTEXT search_eof_ms={}", at.elapsed().as_millis());
                 }
-                let hits = self
+                let (hits, complete) = self
                     .search
                     .as_ref()
                     .and_then(|s| s.results.as_ref())
-                    .map_or(0, |r| r.hits.len());
+                    .map_or((0, false), |r| (r.hits.len(), r.complete));
                 println!("RUSTTEXT search_eof_hits={hits}");
+                println!("RUSTTEXT search_eof_complete={}", u8::from(complete));
                 self.start_e2e_cancel_search(window, cx);
             }
             6 => {
@@ -445,6 +446,15 @@ pub(crate) fn record_first_frame_presented() {
             start.elapsed().as_millis()
         );
     }
+}
+
+pub(crate) fn on_after_frame_presented(
+    window: &mut Window,
+    callback: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
+    window.on_next_frame(move |window, _| {
+        window.on_next_frame(callback);
+    });
 }
 
 pub(crate) fn record_document_ready() {

@@ -136,7 +136,7 @@ impl LogViewer {
             let start = crate::log_viewer::measurement_start();
             let e2e = crate::log_viewer::e2e_enabled();
             let viewer = cx.entity().downgrade();
-            window.on_next_frame(move |window, cx| {
+            crate::log_viewer::on_after_frame_presented(window, move |window, cx| {
                 if first && let Some(start) = start {
                     println!(
                         "RUSTTEXT first_log_frame_ms={}",

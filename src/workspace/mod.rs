@@ -103,7 +103,7 @@ impl Workspace {
         }
         this.check_for_updates(false, window, cx);
         crate::log_viewer::record_window_visible();
-        window.on_next_frame(|_, _| {
+        crate::log_viewer::on_after_frame_presented(window, |_, _| {
             crate::log_viewer::record_first_frame_presented();
         });
         this
