@@ -1,0 +1,92 @@
+﻿name: Fork Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit SHA to build
+        required: true
+        default: main
+        type: string
+      tag:
+        description: Release tag name (e.g. preview-pr13 or v0.1.5)
+        required: true
+        type: string
+      title:
+        description: Optional release title
+        required: false
+        default: ''
+        type: string
+      prerelease:
+        description: Mark GitHub Release as prerelease
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - 'preview-*'
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.repository == 'TheVSAKeeper/RustText'
+    name: Build and publish Windows release
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0-x86_64-pc-windows-msvc
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+      - name: Build release binary with static CRT
+        run: |
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = '-C target-feature=+crt-static'
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Package release archive
+        run: |
+          .\tools\Package-RustText.ps1 `
+            -ExecutablePath 'target\x86_64-pc-windows-msvc\release\rusttext.exe' `
+            -OutputDirectory 'target\distribution\release'
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TITLE: ${{ inputs.title }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = if ($env:EVENT_NAME -eq 'workflow_dispatch') { $env:INPUT_TAG } else { $env:REF_NAME }
+          if ($tag -notmatch '^[A-Za-z0-9._-]+$') {
+            throw "Invalid release tag: $tag"
+          }
+          $title = if ($env:INPUT_TITLE) { $env:INPUT_TITLE } else { "RustText $tag" }
+          $isPrerelease = if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $env:INPUT_PRERELEASE -eq 'true'
+          } else {
+            $tag -like 'preview-*'
+          }
+          $commit = (git rev-parse HEAD).Trim()
+          $assets = @(
+            'target\distribution\release\RustText.zip',
+            'target\distribution\release\RustText.zip.sha256'
+          )
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw 'gh release upload failed' }
+          } else {
+            $releaseArgs = @('release', 'create', $tag, '--repo', $env:GITHUB_REPOSITORY, '--target', $commit, '--title', $title, '--notes', "Сборка из коммита $commit")
+            if ($isPrerelease) { $releaseArgs += '--prerelease' }
+            gh @releaseArgs @assets
+            if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
+          }
